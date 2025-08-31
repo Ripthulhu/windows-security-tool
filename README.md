@@ -26,6 +26,7 @@ A single **batch script** for power users to quickly configure Windows security/
 
 * Disabling mitigations/Defender features **reduces security**. Use only if you understand the risk.
 * If Defender changes do not apply, ensure **Tamper Protection** is off in Windows Security.
+* Note that you need at least Pro for the Defender changes to apply. Home is not supported.
 * Tested on Windows 10/11. Requires Internet on first run to install the `SpeculationControl` PowerShell module (CurrentUser scope).
 
 ## License
