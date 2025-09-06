@@ -228,10 +228,34 @@ echo.
 echo Completed. A restart is required to load the hypervisor and finalize feature changes.
 echo.
 pause
-goto menu
+goto backup_menu
 
 :defender_apply
 echo.
+echo ===========================================================
+echo Microsoft Defender configuration
+echo ===========================================================
+echo.
+echo  IMPORTANT:
+echo    - To allow these policy changes, Windows Security ^
+must have **Tamper Protection** turned OFF.
+echo    - Path: Windows Security ^> Virus ^& threat protection ^
+^> Manage settings ^> Tamper Protection.
+echo.
+choice /C YNS /N /M "Open Windows Security to that page now? (Y)es / (N)o / (S)kip configuration: "
+set "tpchoice=%errorlevel%"
+if "%tpchoice%"=="1" (
+  start "" windowsdefender://threatsettings
+  echo.
+  echo After turning **Tamper Protection** OFF, press any key here to continue...
+  pause >nul
+) else if "%tpchoice%"=="3" (
+  echo Skipping Defender configuration.
+  echo.
+  pause
+  goto menu
+)
+
 echo Configuring Microsoft Defender policies (Real-time + Scan)...
 REM --- Real-time Protection ---
 reg add "%WD_RTP%" /v DisableRealtimeMonitoring  /t REG_DWORD /d 1 /f >nul
@@ -272,7 +296,7 @@ gpupdate /target:computer /force
 echo Completed. A restart may be required for full enforcement.
 echo.
 pause
-goto menu
+goto backup_menu
 
 :status
 echo.
