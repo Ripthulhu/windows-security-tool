@@ -1,4 +1,4 @@
-# Windows Security Tool (PowerShell)
+# Windows Security Tool
 
 A PowerShell script to quickly configure Windows security/mitigation  settings from one menu.
 
