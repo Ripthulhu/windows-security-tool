@@ -1,35 +1,53 @@
 <# 
-    Windows Security Tool (PowerShell Edition)
+    Windows Security Tool (PowerShell Edition) - Stream-safe
 
-    - Speculative execution mitigations (Spectre v2, Meltdown, SSBD, BHB)
-    - Hypervisor/virtualization stack (BCDEdit, VBS, Windows features)
-    - Microsoft Defender policies (Real-time Protection + Scan)
-    - Status (registry + Get-SpeculationControlSettings + virtualization + Defender)
-    - SpeculationControl module install/repair
-    - Backup/Restore submenu
+    Works when run locally OR via:
+      powershell -ExecutionPolicy ByPass -c "irm https://raw.githubusercontent.com/Ripthulhu/windows-security-tool/refs/heads/main/WindowsSecurityTool.ps1 | iex"
+
+    Features:
+      - Speculative execution mitigations (Spectre v2, Meltdown, SSBD, BHB)
+      - Hypervisor/virtualization stack (BCDEdit, VBS, Windows features)
+      - Microsoft Defender policies (Real-time Protection + Scan)
+      - Status (registry + Get-SpeculationControlSettings + virtualization + Defender)
+      - SpeculationControl module install/repair
+      - Backup/Restore submenu
 
     Notes:
-      - Run from an elevated (Administrator) session (auto-prompts if not).
+      - Requires elevation (auto-prompts if not).
       - Restart is required after mitigation or virtualization changes.
       - Defender policy changes may require gpupdate and/or a restart.
 #>
 
-# --- Self-elevate if not admin ---
-function Test-IsAdmin {
-    $current = [Security.Principal.WindowsIdentity]::GetCurrent()
-    [Security.Principal.WindowsPrincipal]::new($current).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-}
+# ==================== Configuration (stream-aware) ====================
+# Raw URL for streamed elevation re-invoke:
+$ScriptRawUrl = 'https://raw.githubusercontent.com/Ripthulhu/windows-security-tool/refs/heads/main/WindowsSecurityTool.ps1'
 
+# Detect a meaningful base directory (PSScriptRoot is $null when streamed via IEX)
+$BaseDir = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
+
+# --- Self-elevate if not admin (works for local OR streamed runs) ---
+function Test-IsAdmin {
+    $id = [Security.Principal.WindowsIdentity]::GetCurrent()
+    [Security.Principal.WindowsPrincipal]::new($id).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+}
 if (-not (Test-IsAdmin)) {
     Write-Host "Requesting administrator privileges..."
-    $psi = @{
-        FilePath = (Get-Process -Id $PID).Path
-        ArgumentList = @('-NoProfile','-ExecutionPolicy','Bypass','-File', "`"$PSCommandPath`"")
-        Verb = 'RunAs'
-    }
-    Start-Process @psi
+    $psExe = (Get-Process -Id $PID).Path
+
+    # Local script run => relaunch with -File; streamed IEX run => relaunch with web bootstrap.
+    $args =
+        if ($PSCommandPath) {
+            @('-NoProfile','-ExecutionPolicy','Bypass','-File',"`"$PSCommandPath`"")
+        } else {
+            @('-NoProfile','-ExecutionPolicy','Bypass','-Command',"irm $ScriptRawUrl | iex")
+        }
+
+    Start-Process -FilePath $psExe -ArgumentList $args -Verb RunAs | Out-Null
     exit
 }
+
+# Optional: window title
+try { $Host.UI.RawUI.WindowTitle = 'Windows Security Tool' } catch {}
 
 # -------------------- Constants & Config --------------------
 $KEY     = 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management'
@@ -38,17 +56,14 @@ $WD_POL  = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender'
 $WD_RTP  = Join-Path $WD_POL 'Real-Time Protection'
 $WD_SCAN = Join-Path $WD_POL 'Scan'
 
-$BACKUP  = Join-Path $PSScriptRoot 'MM_Overrides_Backup.reg'
+# Backup file lives next to the script when local; current dir when streamed
+$BACKUP  = Join-Path $BaseDir 'MM_Overrides_Backup.reg'
 
 # Mitigation bits (FeatureSettingsOverride)
-#   0x1  = Spectre v2 OS mitigation disabled
-#   0x2  = Meltdown  OS mitigation disabled
-#   0x8  = SSBD system-wide enabled
-#   0x00800000 = BHB/BHI mitigation enabled
-[uint32]$BIT_BTI_DISABLE = 0x1
-[uint32]$BIT_KVA_DISABLE = 0x2
-[uint32]$BIT_SSBD_ENABLE = 0x8
-[uint32]$BIT_BHB_ENABLE  = 0x00800000
+[uint32]$BIT_BTI_DISABLE = 0x1         # Spectre v2 OS mitigation disabled
+[uint32]$BIT_KVA_DISABLE = 0x2         # Meltdown  OS mitigation disabled
+[uint32]$BIT_SSBD_ENABLE = 0x8         # SSBD system-wide enabled
+[uint32]$BIT_BHB_ENABLE  = 0x00800000  # BHB/BHI mitigation enabled
 
 # DISM feature names
 $F_HV      = 'Microsoft-Hyper-V-All'
@@ -62,42 +77,35 @@ $FeatureList = @($F_HV,$F_VMP,$F_WHP,$F_SANDBOX,$F_WSL)
 $SCAN_CPU_MAX = 50   # Valid 5-100 (0 disables throttling)
 
 # -------------------- Helpers --------------------
+function Press-Enter { Write-Host; Read-Host "Press Enter to continue..." | Out-Null }
+
 function Get-FsoMask {
     $v  = (Get-ItemProperty -Path $KEY -ErrorAction SilentlyContinue).FeatureSettingsOverride
     $vm = (Get-ItemProperty -Path $KEY -ErrorAction SilentlyContinue).FeatureSettingsOverrideMask
     [uint32]$v  = if ($null -ne $v)  { $v }  else { 0 }
     [uint32]$vm = if ($null -ne $vm) { $vm } else { 0 }
-    return [pscustomobject]@{ FSO = $v; FSOMASK = $vm }
+    [pscustomobject]@{ FSO = $v; FSOMASK = $vm }
 }
 function Set-FsoMask([uint32]$NewFSO, [uint32]$NewMask) {
     try {
         New-Item -Path $KEY -Force | Out-Null
         New-ItemProperty -Path $KEY -Name 'FeatureSettingsOverride'     -Value $NewFSO -PropertyType DWord -Force | Out-Null
         New-ItemProperty -Path $KEY -Name 'FeatureSettingsOverrideMask' -Value $NewMask -PropertyType DWord -Force | Out-Null
-        return $true
+        $true
     } catch {
         Write-Warning "Failed to write FSO/Mask: $($_.Exception.Message)"
-        return $false
+        $false
     }
 }
 
-function Press-Enter { Write-Host; Read-Host "Press Enter to continue..." | Out-Null }
+function Run-Cmd([string]$File, [string]$Args) { & $File $Args 2>&1 }
 
-function Run-Cmd([string]$File, [string]$Args) {
-    & $File $Args 2>&1
-}
+function Dism-EnableFeature([string]$Feature)  { Run-Cmd dism "/online /Enable-Feature /FeatureName:$Feature /All /NoRestart" | Write-Host }
+function Dism-DisableFeature([string]$Feature) { Run-Cmd dism "/online /Disable-Feature /FeatureName:$Feature /NoRestart"     | Write-Host }
 
-function Dism-EnableFeature([string]$Feature) {
-    Run-Cmd dism "/online /Enable-Feature /FeatureName:$Feature /All /NoRestart" | Write-Host
-}
-function Dism-DisableFeature([string]$Feature) {
-    Run-Cmd dism "/online /Disable-Feature /FeatureName:$Feature /NoRestart" | Write-Host
-}
 function Get-FeatureState([string]$Feature) {
-    # Prefer native cmdlet when available
     try {
-        $fi = Get-WindowsOptionalFeature -Online -FeatureName $Feature -ErrorAction Stop
-        return $fi.State
+        (Get-WindowsOptionalFeature -Online -FeatureName $Feature -ErrorAction Stop).State
     } catch {
         $out = Run-Cmd dism "/online /Get-FeatureInfo /FeatureName:$Feature"
         ($out | Where-Object { $_ -match 'State\s*:\s*(.+)$' } | ForEach-Object { ($_ -replace '.*State\s*:\s*','').Trim() }) | Select-Object -First 1
@@ -116,7 +124,7 @@ function Show-VbsPolicy {
 function Ensure-SpeculationModule {
     try {
         if (Get-Module -ListAvailable -Name SpeculationControl) { return $true }
-        # Prepare PSGallery & NuGet
+        try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}
         if (-not (Get-PackageProvider -Name NuGet -ErrorAction SilentlyContinue)) {
             Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force -Scope CurrentUser | Out-Null
         }
@@ -125,10 +133,10 @@ function Ensure-SpeculationModule {
         }
         try { Set-PSRepository -Name PSGallery -InstallationPolicy Trusted -ErrorAction Stop } catch {}
         Install-Module -Name SpeculationControl -Scope CurrentUser -Force -AllowClobber
-        return $true
+        $true
     } catch {
         Write-Warning "SpeculationControl install failed: $($_.Exception.Message)"
-        return $false
+        $false
     }
 }
 
@@ -237,9 +245,7 @@ function Disable-BTI-KVA {
     $r = Get-FsoMask
     [uint32]$newFSO  = ($r.FSO -bor ($BIT_BTI_DISABLE -bor $BIT_KVA_DISABLE))
     [uint32]$newMask = ($r.FSOMASK -bor ($BIT_BTI_DISABLE -bor $BIT_KVA_DISABLE))
-    if (Set-FsoMask $newFSO $newMask) {
-        Write-Host "Completed. Restart is required to apply changes."
-    } else { Write-Host "Operation failed." }
+    if (Set-FsoMask $newFSO $newMask) { Write-Host "Completed. Restart is required to apply changes." } else { Write-Host "Operation failed." }
     Press-Enter
 }
 
@@ -280,9 +286,7 @@ function BHB-Off {
 function Disable-Virtualization {
     Write-Host "`nDisabling virtualization stack..."
     Write-Host "  - Setting hypervisorlaunchtype to OFF"
-    try {
-        bcdedit /set hypervisorlaunchtype off | Out-Null
-    } catch { Write-Warning "    Note: bcdedit returned an error. Ensure BitLocker is suspended and you have admin rights." }
+    try { bcdedit /set hypervisorlaunchtype off | Out-Null } catch { Write-Warning "    Note: bcdedit returned an error. Ensure BitLocker is suspended and you have admin rights." }
 
     Write-Host "  - Disabling Group Policy: Turn On Virtualization Based Security"
     New-Item -Path $DG_POL -Force | Out-Null
@@ -298,9 +302,7 @@ function Disable-Virtualization {
 function Restore-Virtualization {
     Write-Host "`nRestoring virtualization stack to defaults..."
     Write-Host "  - Setting hypervisorlaunchtype to AUTO"
-    try {
-        bcdedit /set hypervisorlaunchtype auto | Out-Null
-    } catch { Write-Warning "    Note: bcdedit returned an error. Ensure BitLocker is suspended and you have admin rights." }
+    try { bcdedit /set hypervisorlaunchtype auto | Out-Null } catch { Write-Warning "    Note: bcdedit returned an error. Ensure BitLocker is suspended and you have admin rights." }
 
     Write-Host "  - Clearing VBS policy value"
     try { Remove-ItemProperty -Path $DG_POL -Name EnableVirtualizationBasedSecurity -Force -ErrorAction Stop } catch {}
@@ -313,7 +315,7 @@ function Restore-Virtualization {
 }
 
 function Defender-Apply {
-    Write-Host @"
+@"
 ===========================================================
 Microsoft Defender configuration
 ===========================================================
@@ -323,7 +325,7 @@ Microsoft Defender configuration
       must have **Tamper Protection** turned OFF.
     - Path: Windows Security > Virus & threat protection
             > Manage settings > Tamper Protection.
-"@
+"@ | Write-Host
     $choice = Read-Host "Open Windows Security to that page now? (Y)es / (N)o / (S)kip configuration"
     if ($choice -match '^[Yy]') {
         Start-Process 'windowsdefender://threatsettings'
@@ -346,7 +348,7 @@ Microsoft Defender configuration
     New-ItemProperty -Path $WD_RTP -Name DisableOnAccessProtection -Value 1 -PropertyType DWord -Force | Out-Null
 
     # Scan
-    New-ItemProperty -Path $WD_SCAN -Name AvgCPULoadFactor           -Value ([int]$SCAN_CPU_MAX) -PropertyType DWord -Force | Out-Null
+    New-ItemProperty -Path $WD_SCAN -Name AvgCPULoadFactor            -Value ([int]$SCAN_CPU_MAX) -PropertyType DWord -Force | Out-Null
     New-ItemProperty -Path $WD_SCAN -Name DisableScanningNetworkFiles -Value 1 -PropertyType DWord -Force | Out-Null
     New-ItemProperty -Path $WD_SCAN -Name LowCpuPriority              -Value 1 -PropertyType DWord -Force | Out-Null
     New-ItemProperty -Path $WD_SCAN -Name ScanOnlyIfIdle              -Value 1 -PropertyType DWord -Force | Out-Null
