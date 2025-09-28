@@ -39,6 +39,3 @@ powershell -ExecutionPolicy ByPass -c "irm https://raw.githubusercontent.com/Rip
 ## License
 
 MIT.
-
-```
-```
